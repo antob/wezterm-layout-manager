@@ -5,7 +5,7 @@ local M = {}
 
 -- Default configuration
 local config = {
-  layout_path = wezterm.home_dir .. "/.local/share/wezterm/layouts.json",
+  workspace_path = wezterm.home_dir .. "/.local/share/wezterm/workspaces.json",
 }
 
 --- Read file contents, returns nil on failure
@@ -23,7 +23,7 @@ end
 local function write_file(path, content)
   local f = io.open(path, "w")
   if not f then
-    wezterm.log_error("layout-manager: failed to open file for writing: " .. path)
+    wezterm.log_error("workspace-manager: failed to open file for writing: " .. path)
     return false
   end
   f:write(content)
@@ -39,25 +39,25 @@ local function ensure_dir(path)
   end
 end
 
---- Load all layouts from the JSON file
-local function load_layouts_from_file()
-  local content = read_file(config.layout_path)
+--- Load all workspaces from the JSON file
+local function load_workspaces_from_file()
+  local content = read_file(config.workspace_path)
   if not content or content == "" then
     return {}
   end
   local ok, data = pcall(wezterm.json_parse, content)
   if not ok or type(data) ~= "table" then
-    wezterm.log_error("layout-manager: failed to parse layouts file")
+    wezterm.log_error("workspace-manager: failed to parse workspaces file")
     return {}
   end
-  return data.layouts or {}
+  return data.workspaces or {}
 end
 
---- Save layouts array to the JSON file
-local function save_layouts_to_file(layouts)
-  ensure_dir(config.layout_path)
-  local json = wezterm.json_encode({ layouts = layouts })
-  return write_file(config.layout_path, json .. "\n")
+--- Save workspaces array to the JSON file
+local function save_workspaces_to_file(workspaces)
+  ensure_dir(config.workspace_path)
+  local json = wezterm.json_encode({ workspaces = workspaces })
+  return write_file(config.workspace_path, json .. "\n")
 end
 
 --- Get cwd from a pane as a string (file:// URI or nil)
@@ -99,8 +99,8 @@ local function apply_tree(pane, node, tab_cwd)
   end
 end
 
---- Apply a single layout to the current window
-local function apply_layout(gui_window, pane, layout)
+--- Apply a single workspace to the current window
+local function apply_workspace(gui_window, _, workspace)
   local mux_window = gui_window:mux_window()
 
   -- Close all existing tabs except the first one
@@ -110,9 +110,9 @@ local function apply_layout(gui_window, pane, layout)
     gui_window:perform_action(act.CloseCurrentTab({ confirm = false }), mux_window:active_pane())
   end
 
-  local tabs = layout.tabs or {}
+  local tabs = workspace.tabs or {}
   if #tabs == 0 then
-    wezterm.log_info("layout-manager: layout has no tabs")
+    wezterm.log_info("workspace-manager: workspace has no tabs")
     return
   end
 
@@ -161,7 +161,7 @@ local function apply_layout(gui_window, pane, layout)
     end
   end
 
-  wezterm.log_info("layout-manager: applied layout '" .. layout.name .. "'")
+  wezterm.log_info("workspace-manager: applied workspace '" .. workspace.name .. "'")
 end
 
 --- Build a binary split tree from a list of panes with position info.
@@ -292,14 +292,14 @@ local function build_tree(pane_entries)
 
   -- Fallback: should not happen with a valid pane layout.
   -- Return first pane as a leaf.
-  wezterm.log_error("layout-manager: could not determine split for " .. #pane_entries .. " panes")
+  wezterm.log_error("workspace-manager: could not determine split for " .. #pane_entries .. " panes")
   return {
     cwd = get_pane_cwd(pane_entries[1].pane),
   }
 end
 
---- Capture the current window state as a layout table
-local function capture_current_layout(gui_window, layout_name)
+--- Capture the current window state as a workspace table
+local function capture_current_workspace(gui_window, workspace_name)
   local mux_window = gui_window:mux_window()
   local tabs_info = mux_window:tabs_with_info()
   local tabs = {}
@@ -329,103 +329,102 @@ local function capture_current_layout(gui_window, layout_name)
   end
 
   return {
-    name = layout_name,
+    name = workspace_name,
     tabs = tabs,
   }
 end
 
---- Override or append a layout in the layouts list by name
-local function upsert_layout(layouts, new_layout)
-  for i, l in ipairs(layouts) do
-    if l.name == new_layout.name then
-      layouts[i] = new_layout
-      return layouts
+--- Override or append a workspace in the workspaces list by name
+local function upsert_workspace(workspaces, new_workspace)
+  for i, l in ipairs(workspaces) do
+    if l.name == new_workspace.name then
+      workspaces[i] = new_workspace
+      return workspaces
     end
   end
-  table.insert(layouts, new_layout)
-  return layouts
+  table.insert(workspaces, new_workspace)
+  return workspaces
 end
 
 --- Configure the plugin
 function M.setup(opts)
   opts = opts or {}
-  if opts.layout_path then
-    config.layout_path = opts.layout_path
+  if opts.workspace_path then
+    config.workspace_path = opts.workspace_path
   end
 end
 
---- Returns an action that shows a picker to select and apply a layout
-function M.apply_layout()
+--- Returns an action that shows a picker to select and apply a workspace
+function M.apply_workspace()
   return wezterm.action_callback(function(window, pane)
-    local layouts = load_layouts_from_file()
-    if #layouts == 0 then
-      window:toast_notification("Layout Manager", "No layouts found in " .. config.layout_path, nil, 4000)
+    local workspaces = load_workspaces_from_file()
+
+    -- Build a map of saved workspace names
+    local workspace_map = {}
+    for _, workspace in ipairs(workspaces) do
+      workspace_map[workspace.name] = workspace
+    end
+
+    -- Collect workspace names
+    local workspace_set = {}
+    for _, name in ipairs(wezterm.mux.get_workspace_names()) do
+      workspace_set[name] = true
+    end
+
+    -- Build a unified, deduplicated list of names
+    local seen = {}
+    local names = {}
+    for _, workspace in ipairs(workspaces) do
+      if not seen[workspace.name] then
+        seen[workspace.name] = true
+        table.insert(names, workspace.name)
+      end
+    end
+    for name, _ in pairs(workspace_set) do
+      if not seen[name] then
+        seen[name] = true
+        table.insert(names, name)
+      end
+    end
+
+    if #names == 0 then
+      window:toast_notification("Workspace Manager", "No workspaces or workspaces found", nil, 4000)
       return
     end
 
+    local NEW_WORKSPACE_ID = "\0new"
+
     local choices = {}
-    for _, layout in ipairs(layouts) do
-      local tab_count = layout.tabs and #layout.tabs or 0
-      local description = tab_count .. " tab" .. (tab_count ~= 1 and "s" or "")
+    for _, name in ipairs(names) do
+      local has_workspace = workspace_map[name] ~= nil
+      local label
+      if has_workspace then
+        local tab_count = workspace_map[name].tabs and #workspace_map[name].tabs or 0
+        local description = tab_count .. " tab" .. (tab_count ~= 1 and "s" or "")
+        if has_workspace then
+          label = name .. "  (" .. description .. ", workspace active)"
+        else
+          label = name .. "  (" .. description .. ")"
+        end
+      else
+        -- Workspace only: dim with a note
+        label = wezterm.format({
+          { Attribute = { Intensity = "Half" } },
+          { Text = name .. "  (workspace only)" },
+        })
+      end
       table.insert(choices, {
-        id = layout.name,
-        label = layout.name .. "  (" .. description .. ")",
+        id = name,
+        label = label,
       })
     end
 
-    window:perform_action(
-      act.InputSelector({
-        action = wezterm.action_callback(function(inner_window, inner_pane, id, label)
-          if not id and not label then
-            return
-          end
-          for _, layout in ipairs(layouts) do
-            if layout.name == id then
-              apply_layout(inner_window, inner_pane, layout)
-              return
-            end
-          end
-        end),
-        title = "Select Layout",
-        choices = choices,
-        fuzzy = true,
-        fuzzy_description = "Select layout: ",
-      }),
-      pane
-    )
-  end)
-end
-
---- Save the current layout under the given name
-local function do_save_layout(gui_window, name)
-  local layout = capture_current_layout(gui_window, name)
-  local layouts = load_layouts_from_file()
-  layouts = upsert_layout(layouts, layout)
-  if save_layouts_to_file(layouts) then
-    gui_window:toast_notification("Layout Manager", "Saved layout '" .. name .. "'", nil, 4000)
-  else
-    gui_window:toast_notification("Layout Manager", "Failed to save layout", nil, 4000)
-  end
-end
-
-local NEW_LAYOUT_ID = "__new_layout__"
-
---- Returns an action that saves the current window layout to the JSON file.
---- Shows existing layout names to overwrite, plus an option to create a new one.
-function M.save_layout()
-  return wezterm.action_callback(function(window, pane)
-    local layouts = load_layouts_from_file()
-
-    local choices = {}
-    for _, layout in ipairs(layouts) do
-      table.insert(choices, {
-        id = layout.name,
-        label = layout.name,
-      })
-    end
     table.insert(choices, {
-      id = NEW_LAYOUT_ID,
-      label = "+ New layout...",
+      id = NEW_WORKSPACE_ID,
+      label = wezterm.format({
+        { Attribute = { Intensity = "Bold" } },
+        { Text = "+ New workspace" },
+      }),
     })
 
     window:perform_action(
@@ -434,76 +433,137 @@ function M.save_layout()
           if not id and not label then
             return
           end
-          if id == NEW_LAYOUT_ID then
-            -- Prompt for a new name
+
+          -- New workspace: prompt for a name then switch
+          if id == NEW_WORKSPACE_ID then
             inner_window:perform_action(
               act.PromptInputLine({
-                description = wezterm.format({
-                  { Attribute = { Intensity = "Bold" } },
-                  { Foreground = { AnsiColor = "Fuchsia" } },
-                  { Text = "Enter new layout name" },
-                }),
-                action = wezterm.action_callback(function(prompt_window, prompt_pane, line)
-                  if not line or line == "" then
+                description = "New workspace name:",
+                action = wezterm.action_callback(function(prompt_window, prompt_pane, name)
+                  if not name or name == "" then
                     return
                   end
-                  do_save_layout(prompt_window, line)
+                  prompt_window:perform_action(act.SwitchToWorkspace({ name = name }), prompt_pane)
                 end),
               }),
               inner_pane
             )
-          else
-            -- Overwrite existing layout
-            do_save_layout(inner_window, id)
+            return
           end
+
+          -- If a workspace with this name already exists, just switch to it
+          if workspace_set[id] then
+            inner_window:perform_action(act.SwitchToWorkspace({ name = id }), inner_pane)
+            return
+          end
+
+          -- No existing workspace: create one, switch to it, and apply the workspace
+          local workspace = workspace_map[id]
+          if not workspace then
+            return
+          end
+          inner_window:perform_action(act.SwitchToWorkspace({ name = id }), inner_pane)
+          -- Defer workspace application so the workspace switch completes first
+          wezterm.time.call_after(0.1, function()
+            -- Walk all gui windows to find the one now on our workspace
+            for _, gui_win in ipairs(wezterm.gui.gui_windows()) do
+              if gui_win:mux_window():get_workspace() == id then
+                apply_workspace(gui_win, gui_win:mux_window():active_pane(), workspace)
+                break
+              end
+            end
+          end)
         end),
-        title = "Save Layout",
+        title = "Select workspace",
         choices = choices,
         fuzzy = true,
-        fuzzy_description = "Save to layout: ",
+        fuzzy_description = "Select workspace: ",
       }),
       pane
     )
   end)
 end
 
---- Returns an action that shows a picker to delete a layout
-function M.delete_layout()
+--- Save the current workspace under the given name
+local function do_save_workspace(gui_window, name)
+  local workspace = capture_current_workspace(gui_window, name)
+  local workspaces = load_workspaces_from_file()
+  workspaces = upsert_workspace(workspaces, workspace)
+  if save_workspaces_to_file(workspaces) then
+    gui_window:toast_notification("Workspace Manager", "Saved workspace '" .. name .. "'", nil, 4000)
+  else
+    gui_window:toast_notification("Workspace Manager", "Failed to save workspace", nil, 4000)
+  end
+end
+
+--- Returns an action that saves the current window workspace using the active workspace name.
+function M.save_workspace()
+  return wezterm.action_callback(function(window, _)
+    local name = window:mux_window():get_workspace()
+    if not name or name == "" then
+      window:toast_notification("Workspace Manager", "Could not determine workspace name", nil, 4000)
+      return
+    end
+    do_save_workspace(window, name)
+  end)
+end
+
+--- Returns an action that shows a picker to delete a workspace (and its workspace, if any)
+function M.delete_workspace()
   return wezterm.action_callback(function(window, pane)
-    local layouts = load_layouts_from_file()
-    if #layouts == 0 then
-      window:toast_notification("Layout Manager", "No layouts to delete", nil, 4000)
+    local workspaces = load_workspaces_from_file()
+    if #workspaces == 0 then
+      window:toast_notification("Workspace Manager", "No workspaces to delete", nil, 4000)
       return
     end
 
     local choices = {}
-    for _, layout in ipairs(layouts) do
+    for _, workspace in ipairs(workspaces) do
       table.insert(choices, {
-        id = layout.name,
-        label = layout.name,
+        id = workspace.name,
+        label = workspace.name,
       })
     end
 
     window:perform_action(
       act.InputSelector({
-        action = wezterm.action_callback(function(inner_window, inner_pane, id, label)
+        action = wezterm.action_callback(function(inner_window, _, id, label)
           if not id and not label then
             return
           end
-          local new_layouts = {}
-          for _, l in ipairs(layouts) do
+          -- Remove from saved workspaces
+          local new_workspaces = {}
+          for _, l in ipairs(workspaces) do
             if l.name ~= id then
-              table.insert(new_layouts, l)
+              table.insert(new_workspaces, l)
             end
           end
-          if save_layouts_to_file(new_layouts) then
-            inner_window:toast_notification("Layout Manager", "Deleted layout '" .. id .. "'", nil, 4000)
+          if not save_workspaces_to_file(new_workspaces) then
+            return
           end
+          -- Delete the workspace with the same name, if it exists
+          local workspace_names = wezterm.mux.get_workspace_names()
+          for _, ws_name in ipairs(workspace_names) do
+            if ws_name == id then
+              -- Close all windows in that workspace
+              for _, mux_win in ipairs(wezterm.mux.all_windows()) do
+                if mux_win:get_workspace() == id then
+                  for _, tab in ipairs(mux_win:tabs()) do
+                    for _, p in ipairs(tab:panes()) do
+                      p:send_text("exit\n")
+                    end
+                  end
+                end
+              end
+              break
+            end
+          end
+          inner_window:toast_notification("Workspace Manager", "Deleted workspace '" .. id .. "'", nil, 4000)
         end),
-        title = "Delete Layout",
+        title = "Delete workspace",
         choices = choices,
         fuzzy = true,
-        fuzzy_description = "Delete layout: ",
+        fuzzy_description = "Delete workspace: ",
       }),
       pane
     )
